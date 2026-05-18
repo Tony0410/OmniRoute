@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { CORS_HEADERS, handleCorsOptions } from "@/shared/utils/cors";
 import { getPluginByName, updatePluginConfig } from "@/lib/db/plugins";
+import { requireManagementAuth } from "@/lib/api/requireManagementAuth";
 import { z } from "zod";
 
 export async function OPTIONS() {
@@ -10,10 +11,9 @@ export async function OPTIONS() {
 /**
  * GET /api/plugins/[name]/config — Get plugin configuration
  */
-export async function GET(
-  _request: NextRequest,
-  { params }: { params: Promise<{ name: string }> }
-) {
+export async function GET(request: NextRequest, { params }: { params: Promise<{ name: string }> }) {
+  const authError = await requireManagementAuth(request);
+  if (authError) return authError;
   const { name } = await params;
   const plugin = getPluginByName(name);
 
@@ -37,6 +37,8 @@ export async function GET(
  * PUT /api/plugins/[name]/config — Update plugin configuration
  */
 export async function PUT(request: NextRequest, { params }: { params: Promise<{ name: string }> }) {
+  const authError = await requireManagementAuth(request);
+  if (authError) return authError;
   const { name } = await params;
   const body = await request.json();
 

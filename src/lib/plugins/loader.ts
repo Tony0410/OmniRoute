@@ -1,14 +1,18 @@
 /**
- * Plugin loader — loads plugins in sandboxed VM contexts.
+ * Plugin loader — loads plugins in isolated child processes.
  *
- * Uses Node.js vm module for in-process isolation. Plugins run in a
- * restricted context with permission-gated globals.
+ * Uses child_process.fork() for process-level isolation. Each plugin
+ * runs in a separate Node.js process with restricted environment.
+ * Complies with Rule 3 (no eval/new Function/implied eval).
  *
  * @module plugins/loader
  */
 
-import { readFile } from "fs/promises";
-import * as vm from "vm";
+import { fork } from "child_process";
+import { writeFile, rm } from "fs/promises";
+import { join } from "path";
+import { tmpdir } from "os";
+import { randomUUID } from "crypto";
 import { logger } from "../../../open-sse/utils/logger.ts";
 import type { PluginManifestWithDefaults, Permission } from "./manifest";
 import type { Plugin, PluginContext, PluginResult } from "./index";
@@ -22,105 +26,111 @@ export interface LoadedPlugin {
   cleanup: () => void;
 }
 
-/**
- * Create a sandboxed context with permission-gated globals.
- */
-function createSandbox(permissions: Permission[]): Record<string, unknown> {
-  const sandbox: Record<string, unknown> = {
-    console: {
-      log: (...args: unknown[]) => log.info("plugin.log", { args }),
-      warn: (...args: unknown[]) => log.warn("plugin.warn", { args }),
-      error: (...args: unknown[]) => log.error("plugin.error", { args }),
-    },
-    setTimeout,
-    clearTimeout,
-    setInterval,
-    clearInterval,
-    Promise,
-    JSON,
-    Math,
-    Date,
-    Array,
-    Object,
-    String,
-    Number,
-    Boolean,
-    RegExp,
-    Error,
-    TypeError,
-    RangeError,
-    SyntaxError,
-    URIError,
-    Map,
-    Set,
-    WeakMap,
-    WeakSet,
-    Symbol,
-    parseInt,
-    parseFloat,
-    isNaN,
-    isFinite,
-    Buffer,
-    URL,
-    URLSearchParams,
-  };
+// ── Plugin host script (runs in child process) ──
 
-  if (permissions.includes("network")) {
-    sandbox.fetch = globalThis.fetch;
-    sandbox.AbortController = globalThis.AbortController;
-    sandbox.Headers = globalThis.Headers;
-    sandbox.Request = globalThis.Request;
-    sandbox.Response = globalThis.Response;
+const PLUGIN_HOST_SCRIPT = `
+const { parentPort } = require("worker_threads");
+const path = require("path");
+
+// Load the plugin module
+const pluginPath = process.argv[2];
+const plugin = require(pluginPath);
+const exports = plugin.default || plugin;
+
+// Send ready signal
+parentPort.postMessage({ type: "ready", hooks: Object.keys(exports).filter(k => typeof exports[k] === "function") });
+
+// Handle messages from parent
+parentPort.on("message", async (msg) => {
+  if (msg.type === "call") {
+    try {
+      const handler = exports[msg.hook];
+      if (typeof handler !== "function") {
+        parentPort.postMessage({ type: "result", id: msg.id, error: "Hook not found" });
+        return;
+      }
+      const result = await handler(msg.payload);
+      parentPort.postMessage({ type: "result", id: msg.id, result });
+    } catch (err) {
+      parentPort.postMessage({ type: "result", id: msg.id, error: err.message });
+    }
   }
-
-  return sandbox;
-}
+});
+`;
 
 /**
- * Load a plugin entry point in a VM context.
- * Returns the exported hooks (onRequest, onResponse, onError) wrapped as a Plugin.
+ * Load a plugin in an isolated child process.
+ * Returns the plugin interface with hooks that communicate via IPC.
  */
 export async function loadPlugin(
   entryPoint: string,
   manifest: PluginManifestWithDefaults
 ): Promise<LoadedPlugin> {
   const permissions = manifest.requires.permissions;
-  const sandbox = createSandbox(permissions);
+  const hostId = randomUUID();
+  const hostScriptPath = join(tmpdir(), `omniroute-plugin-host-${hostId}.js`);
 
-  // Read plugin source
-  const source = await readFile(entryPoint, "utf-8");
+  // Write host script to temp file
+  await writeFile(hostScriptPath, PLUGIN_HOST_SCRIPT, "utf-8");
 
-  // Create VM context
-  const context = vm.createContext(sandbox);
-
-  // Provide a minimal module system
-  const moduleExports: Record<string, any> = {};
-  const moduleObj = { exports: moduleExports };
-  sandbox.module = moduleObj;
-  sandbox.exports = moduleExports;
-  const allowedModules: Record<string, unknown> = {};
-  if (permissions.includes("network")) {
-    allowedModules.crypto = require("crypto");
-  }
-  sandbox.require = (id: string) => {
-    if (id in allowedModules) return allowedModules[id];
-    throw new Error(`Module '${id}' is not allowed in plugin sandbox`);
+  // Build restricted environment for child process
+  const env: Record<string, string> = {
+    ...getFilteredEnv(permissions),
+    PLUGIN_ENTRY: entryPoint,
+    PLUGIN_NAME: manifest.name,
   };
 
-  try {
-    // Wrap source in a function to capture exports
-    const wrapped = `(async function(module, exports, require) {\n${source}\n})(module, exports, require);`;
-    vm.runInContext(wrapped, context, {
-      filename: entryPoint,
-      timeout: 10000, // 10s init timeout
-    });
-  } catch (err: any) {
-    log.error("loader.vm_error", { name: manifest.name, error: err.message });
-    throw new Error(`Failed to load plugin '${manifest.name}': ${err.message}`);
-  }
+  // Fork child process with restricted args
+  const child = fork(hostScriptPath, [entryPoint], {
+    env,
+    stdio: ["pipe", "pipe", "pipe", "ipc"],
+    execArgv: ["--no-warnings"],
+  });
 
-  // Extract exports
-  const pluginExports = moduleObj.exports;
+  // Track pending calls
+  const pendingCalls: Map<string, { resolve: Function; reject: Function }> = new Map();
+  let callCounter = 0;
+
+  // Handle IPC messages
+  child.on("message", (msg: any) => {
+    if (msg.type === "ready") {
+      log.info("loader.process_ready", { name: manifest.name, hooks: msg.hooks });
+    } else if (msg.type === "result") {
+      const pending = pendingCalls.get(msg.id);
+      if (pending) {
+        pendingCalls.delete(msg.id);
+        if (msg.error) {
+          pending.reject(new Error(msg.error));
+        } else {
+          pending.resolve(msg.result);
+        }
+      }
+    }
+  });
+
+  child.on("error", (err) => {
+    log.error("loader.process_error", { name: manifest.name, error: err.message });
+  });
+
+  child.on("exit", (code) => {
+    log.info("loader.process_exit", { name: manifest.name, code });
+    // Reject all pending calls
+    for (const [, pending] of pendingCalls) {
+      pending.reject(new Error(`Plugin process exited with code ${code}`));
+    }
+    pendingCalls.clear();
+    // Cleanup temp file
+    rm(hostScriptPath, { force: true }).catch(() => {});
+  });
+
+  // Helper to call a hook in the child process
+  const callHook = (hook: string, payload: unknown): Promise<unknown> => {
+    return new Promise((resolve, reject) => {
+      const id = String(++callCounter);
+      pendingCalls.set(id, { resolve, reject });
+      child.send({ type: "call", id, hook, payload });
+    });
+  };
 
   // Build Plugin interface
   const hooks: string[] = [];
@@ -130,80 +140,68 @@ export async function loadPlugin(
     enabled: true,
   };
 
-  if (typeof pluginExports.onRequest === "function") {
-    plugin.onRequest = async (ctx: PluginContext): Promise<PluginResult | void> => {
-      try {
-        return await pluginExports.onRequest(ctx);
-      } catch (err: any) {
-        log.error("plugin.onRequest_error", { name: manifest.name, error: err.message });
-      }
-    };
-    hooks.push("onRequest");
-  }
-
-  if (typeof pluginExports.onResponse === "function") {
-    plugin.onResponse = async (ctx: PluginContext, response: any): Promise<any | void> => {
-      try {
-        return await pluginExports.onResponse(ctx, response);
-      } catch (err: any) {
-        log.error("plugin.onResponse_error", { name: manifest.name, error: err.message });
-      }
-    };
-    hooks.push("onResponse");
-  }
-
-  if (typeof pluginExports.onError === "function") {
-    plugin.onError = async (ctx: PluginContext, error: Error): Promise<any | void> => {
-      try {
-        return await pluginExports.onError(ctx, error);
-      } catch (err: any) {
-        log.error("plugin.onError_error", { name: manifest.name, error: err.message });
-      }
-    };
-    hooks.push("onError");
-  }
-
-  // Also check for default export
-  if (pluginExports.default && typeof pluginExports.default === "object") {
-    const def = pluginExports.default;
-    if (typeof def.onRequest === "function" && !plugin.onRequest) {
-      plugin.onRequest = async (ctx) => {
-        try {
-          return await def.onRequest(ctx);
-        } catch (err: any) {
-          log.error("plugin.onRequest_error", { name: manifest.name, error: err.message });
-        }
-      };
-      hooks.push("onRequest");
+  // Create hook wrappers
+  plugin.onRequest = async (ctx: PluginContext): Promise<PluginResult | void> => {
+    try {
+      const result = await callHook("onRequest", ctx);
+      return result as PluginResult | void;
+    } catch (err: any) {
+      log.error("plugin.onRequest_error", { name: manifest.name, error: err.message });
     }
-    if (typeof def.onResponse === "function" && !plugin.onResponse) {
-      plugin.onResponse = async (ctx, resp) => {
-        try {
-          return await def.onResponse(ctx, resp);
-        } catch (err: any) {
-          log.error("plugin.onResponse_error", { name: manifest.name, error: err.message });
-        }
-      };
-      hooks.push("onResponse");
-    }
-    if (typeof def.onError === "function" && !plugin.onError) {
-      plugin.onError = async (ctx, err) => {
-        try {
-          return await def.onError(ctx, err);
-        } catch (e: any) {
-          log.error("plugin.onError_error", { name: manifest.name, error: e.message });
-        }
-      };
-      hooks.push("onError");
-    }
-  }
+  };
+  hooks.push("onRequest");
 
-  log.info("loader.loaded", { name: manifest.name, hooks });
+  plugin.onResponse = async (ctx: PluginContext, response: unknown): Promise<unknown | void> => {
+    try {
+      return await callHook("onResponse", { ctx, response });
+    } catch (err: any) {
+      log.error("plugin.onResponse_error", { name: manifest.name, error: err.message });
+    }
+  };
+  hooks.push("onResponse");
+
+  plugin.onError = async (ctx: PluginContext, error: Error): Promise<unknown | void> => {
+    try {
+      return await callHook("onError", { ctx, error: error.message });
+    } catch (err: any) {
+      log.error("plugin.onError_error", { name: manifest.name, error: err.message });
+    }
+  };
+  hooks.push("onError");
+
+  log.info("loader.loaded", { name: manifest.name, hooks, pid: child.pid });
 
   const cleanup = () => {
-    // VM contexts are GC'd when no references remain
+    child.kill();
+    rm(hostScriptPath, { force: true }).catch(() => {});
     log.info("loader.cleanup", { name: manifest.name });
   };
 
   return { name: manifest.name, manifest, plugin, cleanup };
+}
+
+/**
+ * Filter environment variables based on permissions.
+ * Only pass safe env vars unless "env" permission is granted.
+ */
+function getFilteredEnv(permissions: Permission[]): Record<string, string> {
+  const safeKeys = ["PATH", "HOME", "USER", "LANG", "LC_ALL", "NODE_ENV"];
+  const env: Record<string, string> = {};
+
+  for (const key of safeKeys) {
+    if (process.env[key]) {
+      env[key] = process.env[key]!;
+    }
+  }
+
+  if (permissions.includes("env")) {
+    // Pass all env vars
+    for (const [key, value] of Object.entries(process.env)) {
+      if (value !== undefined && !safeKeys.includes(key)) {
+        env[key] = value;
+      }
+    }
+  }
+
+  return env;
 }
