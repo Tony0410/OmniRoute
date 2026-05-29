@@ -7,13 +7,13 @@
  * @module plugins/manager
  */
 
-import { mkdir, cp, rm } from "fs/promises";
+import { mkdir, cp, rm, realpath } from "fs/promises";
 import { join, dirname } from "path";
 import { randomUUID } from "crypto";
 import { logger } from "../../../open-sse/utils/logger.ts";
 import { getDefaultPluginDir, scanPluginDir } from "./scanner";
 import { loadPlugin, type LoadedPlugin } from "./loader";
-import { registerPlugin, unregisterPlugin } from "./index";
+import { registerHook, unregisterHooks } from "./hooks";
 import {
   insertPlugin,
   getPluginByName,
@@ -140,17 +140,33 @@ class PluginManager {
 
     const manifest = JSON.parse(row.manifest) as PluginManifestWithDefaults;
 
-    // Path traversal guard: entry point must stay within plugin directory
+    // Path traversal guard: use realpath to resolve symlinks
     const entryPoint = join(row.pluginDir, manifest.main);
-    if (!entryPoint.startsWith(row.pluginDir)) {
+    let resolvedPluginDir: string;
+    try {
+      resolvedPluginDir = await realpath(row.pluginDir);
+    } catch {
+      throw new Error(`Plugin directory '${row.pluginDir}' does not exist`);
+    }
+    const resolvedEntry = await realpath(entryPoint).catch(() => null);
+    if (
+      !resolvedEntry ||
+      (!resolvedEntry.startsWith(resolvedPluginDir + "/") && resolvedEntry !== resolvedPluginDir)
+    ) {
       throw new Error(`Plugin '${name}' entry point escapes plugin directory`);
     }
 
     try {
       const loaded = await loadPlugin(entryPoint, manifest);
 
-      // Register hooks with the existing plugin system
-      registerPlugin(loaded.plugin);
+      // Register hooks individually via registerHook
+      const hookNames = ["onRequest", "onResponse", "onError"] as const;
+      for (const hookName of hookNames) {
+        const handler = loaded.plugin[hookName];
+        if (typeof handler === "function") {
+          registerHook(hookName, name, handler as (payload: unknown) => void | Promise<void>);
+        }
+      }
 
       this.loadedPlugins.set(name, loaded);
       updatePluginStatus(name, "active");
@@ -169,7 +185,7 @@ class PluginManager {
   async deactivate(name: string): Promise<void> {
     const loaded = this.loadedPlugins.get(name);
     if (loaded) {
-      unregisterPlugin(name);
+      unregisterHooks(name);
       loaded.cleanup();
       this.loadedPlugins.delete(name);
     }

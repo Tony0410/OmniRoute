@@ -19,6 +19,9 @@ import type { Plugin, PluginContext, PluginResult } from "./index";
 
 const log = logger("PLUGIN_LOADER");
 
+const DEFAULT_HOOK_TIMEOUT = 10_000;
+const SIGKILL_GRACE_MS = 3_000;
+
 export interface LoadedPlugin {
   name: string;
   manifest: PluginManifestWithDefaults;
@@ -26,33 +29,34 @@ export interface LoadedPlugin {
   cleanup: () => void;
 }
 
-// ── Plugin host script (runs in child process) ──
+// ── Plugin host script (runs in child process via fork) ──
+// Uses process.send()/process.on("message") — NOT worker_threads.
+// Written as .mjs to force ESM execution regardless of package.json.
 
 const PLUGIN_HOST_SCRIPT = `
-const { parentPort } = require("worker_threads");
-const path = require("path");
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
 
-// Load the plugin module
 const pluginPath = process.argv[2];
-const plugin = require(pluginPath);
+const plugin = await import(pluginPath);
 const exports = plugin.default || plugin;
 
 // Send ready signal
-parentPort.postMessage({ type: "ready", hooks: Object.keys(exports).filter(k => typeof exports[k] === "function") });
+process.send({ type: "ready", hooks: Object.keys(exports).filter(k => typeof exports[k] === "function") });
 
 // Handle messages from parent
-parentPort.on("message", async (msg) => {
+process.on("message", async (msg) => {
   if (msg.type === "call") {
     try {
       const handler = exports[msg.hook];
       if (typeof handler !== "function") {
-        parentPort.postMessage({ type: "result", id: msg.id, error: "Hook not found" });
+        process.send({ type: "result", id: msg.id, error: "Hook not found" });
         return;
       }
       const result = await handler(msg.payload);
-      parentPort.postMessage({ type: "result", id: msg.id, result });
+      process.send({ type: "result", id: msg.id, result });
     } catch (err) {
-      parentPort.postMessage({ type: "result", id: msg.id, error: err.message });
+      process.send({ type: "result", id: msg.id, error: err.message });
     }
   }
 });
@@ -68,45 +72,53 @@ export async function loadPlugin(
 ): Promise<LoadedPlugin> {
   const permissions = manifest.requires.permissions;
   const hostId = randomUUID();
-  const hostScriptPath = join(tmpdir(), `omniroute-plugin-host-${hostId}.js`);
+  // .mjs extension forces ESM execution
+  const hostScriptPath = join(tmpdir(), `omniroute-plugin-host-${hostId}.mjs`);
 
-  // Write host script to temp file
   await writeFile(hostScriptPath, PLUGIN_HOST_SCRIPT, "utf-8");
 
-  // Build restricted environment for child process
   const env: Record<string, string> = {
     ...getFilteredEnv(permissions),
     PLUGIN_ENTRY: entryPoint,
     PLUGIN_NAME: manifest.name,
   };
 
-  // Fork child process with restricted args
   const child = fork(hostScriptPath, [entryPoint], {
     env,
     stdio: ["pipe", "pipe", "pipe", "ipc"],
     execArgv: ["--no-warnings"],
   });
 
-  // Track pending calls
-  const pendingCalls: Map<string, { resolve: Function; reject: Function }> = new Map();
+  // Track pending calls with timeout support
+  const pendingCalls: Map<
+    string,
+    {
+      resolve: (value: unknown) => void;
+      reject: (reason: Error) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
+  > = new Map();
   let callCounter = 0;
 
-  // Handle IPC messages
-  child.on("message", (msg: any) => {
-    if (msg.type === "ready") {
-      log.info("loader.process_ready", { name: manifest.name, hooks: msg.hooks });
-    } else if (msg.type === "result") {
-      const pending = pendingCalls.get(msg.id);
-      if (pending) {
-        pendingCalls.delete(msg.id);
-        if (msg.error) {
-          pending.reject(new Error(msg.error));
-        } else {
-          pending.resolve(msg.result);
+  child.on(
+    "message",
+    (msg: { type: string; id?: string; hooks?: string[]; result?: unknown; error?: string }) => {
+      if (msg.type === "ready") {
+        log.info("loader.process_ready", { name: manifest.name, hooks: msg.hooks });
+      } else if (msg.type === "result" && msg.id) {
+        const pending = pendingCalls.get(msg.id);
+        if (pending) {
+          clearTimeout(pending.timer);
+          pendingCalls.delete(msg.id);
+          if (msg.error) {
+            pending.reject(new Error(msg.error));
+          } else {
+            pending.resolve(msg.result);
+          }
         }
       }
     }
-  });
+  );
 
   child.on("error", (err) => {
     log.error("loader.process_error", { name: manifest.name, error: err.message });
@@ -114,65 +126,96 @@ export async function loadPlugin(
 
   child.on("exit", (code) => {
     log.info("loader.process_exit", { name: manifest.name, code });
-    // Reject all pending calls
     for (const [, pending] of pendingCalls) {
+      clearTimeout(pending.timer);
       pending.reject(new Error(`Plugin process exited with code ${code}`));
     }
     pendingCalls.clear();
-    // Cleanup temp file
     rm(hostScriptPath, { force: true }).catch(() => {});
   });
 
-  // Helper to call a hook in the child process
-  const callHook = (hook: string, payload: unknown): Promise<unknown> => {
+  // Call a hook in the child process with timeout + SIGTERM + SIGKILL escalation
+  const callHook = (
+    hook: string,
+    payload: unknown,
+    timeout = DEFAULT_HOOK_TIMEOUT
+  ): Promise<unknown> => {
     return new Promise((resolve, reject) => {
       const id = String(++callCounter);
-      pendingCalls.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        pendingCalls.delete(id);
+        child.kill("SIGTERM");
+        // Escalate to SIGKILL if plugin ignores SIGTERM
+        const killTimer = setTimeout(() => {
+          try {
+            child.kill("SIGKILL");
+          } catch {}
+        }, SIGKILL_GRACE_MS);
+        child.once("exit", () => clearTimeout(killTimer));
+        reject(new Error(`Plugin hook '${hook}' timed out after ${timeout}ms`));
+      }, timeout);
+
+      pendingCalls.set(id, { resolve, reject, timer });
       child.send({ type: "call", id, hook, payload });
     });
   };
 
   // Build Plugin interface
-  const hooks: string[] = [];
   const plugin: Plugin = {
     name: manifest.name,
     priority: 100,
     enabled: true,
   };
 
-  // Create hook wrappers
   plugin.onRequest = async (ctx: PluginContext): Promise<PluginResult | void> => {
     try {
       const result = await callHook("onRequest", ctx);
       return result as PluginResult | void;
-    } catch (err: any) {
-      log.error("plugin.onRequest_error", { name: manifest.name, error: err.message });
+    } catch (err: unknown) {
+      log.error("plugin.onRequest_error", {
+        name: manifest.name,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   };
-  hooks.push("onRequest");
 
   plugin.onResponse = async (ctx: PluginContext, response: unknown): Promise<unknown | void> => {
     try {
       return await callHook("onResponse", { ctx, response });
-    } catch (err: any) {
-      log.error("plugin.onResponse_error", { name: manifest.name, error: err.message });
+    } catch (err: unknown) {
+      log.error("plugin.onResponse_error", {
+        name: manifest.name,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   };
-  hooks.push("onResponse");
 
   plugin.onError = async (ctx: PluginContext, error: Error): Promise<unknown | void> => {
     try {
       return await callHook("onError", { ctx, error: error.message });
-    } catch (err: any) {
-      log.error("plugin.onError_error", { name: manifest.name, error: err.message });
+    } catch (err: unknown) {
+      log.error("plugin.onError_error", {
+        name: manifest.name,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   };
-  hooks.push("onError");
 
-  log.info("loader.loaded", { name: manifest.name, hooks, pid: child.pid });
+  log.info("loader.loaded", {
+    name: manifest.name,
+    hooks: ["onRequest", "onResponse", "onError"],
+    pid: child.pid,
+  });
 
   const cleanup = () => {
-    child.kill();
+    child.kill("SIGTERM");
+    // Escalate to SIGKILL after grace period
+    const killTimer = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {}
+    }, SIGKILL_GRACE_MS);
+    child.once("exit", () => clearTimeout(killTimer));
     rm(hostScriptPath, { force: true }).catch(() => {});
     log.info("loader.cleanup", { name: manifest.name });
   };
@@ -182,25 +225,16 @@ export async function loadPlugin(
 
 /**
  * Filter environment variables based on permissions.
- * Only pass safe env vars unless "env" permission is granted.
+ * Uses allowlist approach — only pass explicitly safe vars.
  */
 function getFilteredEnv(permissions: Permission[]): Record<string, string> {
   const safeKeys = ["PATH", "HOME", "USER", "LANG", "LC_ALL", "NODE_ENV"];
+  const extendedSafeKeys = [...safeKeys, "PORT", "HOSTNAME", "TZ", "TMPDIR"];
+  const allowedKeys = permissions.includes("env") ? extendedSafeKeys : safeKeys;
   const env: Record<string, string> = {};
 
-  for (const key of safeKeys) {
-    if (process.env[key]) {
-      env[key] = process.env[key]!;
-    }
-  }
-
-  if (permissions.includes("env")) {
-    // Pass all env vars
-    for (const [key, value] of Object.entries(process.env)) {
-      if (value !== undefined && !safeKeys.includes(key)) {
-        env[key] = value;
-      }
-    }
+  for (const key of allowedKeys) {
+    if (process.env[key] !== undefined) env[key] = process.env[key]!;
   }
 
   return env;
