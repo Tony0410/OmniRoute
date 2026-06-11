@@ -141,6 +141,10 @@ type ModelCompatSavePatch = {
   isHidden?: boolean;
 };
 
+// Max connection ids accepted per bulk request — mirrors the API-side cap on
+// /api/providers (PATCH) and /api/providers/test-batch (mode=selected).
+const MAX_BULK_IDS = 100;
+
 function buildCompatMap(rows: CompatModelRow[]): CompatModelMap {
   const m = new Map<string, CompatModelRow>();
   for (const r of rows) if (r.id) m.set(r.id, r);
@@ -1324,26 +1328,42 @@ export default function ProviderDetailPageClient() {
     if (selectedIds.size === 0 || batchUpdating) return;
     setBatchUpdating(isActive ? "activate" : "deactivate");
     try {
-      const res = await fetch("/api/providers", {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ids: Array.from(selectedIds), isActive }),
-      });
-
-      if (res.ok) {
+      // The API caps each request at MAX_BULK_IDS, so chunk the selection
+      // (e.g. select-all on a provider with >100 accounts) and aggregate.
+      const ids = Array.from(selectedIds);
+      let updated = 0;
+      let notFound = 0;
+      for (let i = 0; i < ids.length; i += MAX_BULK_IDS) {
+        const chunk = ids.slice(i, i + MAX_BULK_IDS);
+        const res = await fetch("/api/providers", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids: chunk, isActive }),
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(data.error?.message || data.error || "Batch update failed");
+        }
         const data = await res.json();
-        await fetchConnections();
+        updated += data.updated ?? 0;
+        notFound += Array.isArray(data.notFound) ? data.notFound.length : 0;
+      }
+
+      await fetchConnections();
+
+      if (updated === 0) {
+        notify.warning(t("batchUpdateNone"));
+      } else if (notFound > 0) {
+        notify.warning(t("batchUpdatePartial", { count: updated, skipped: notFound }));
+      } else {
         notify.success(
           isActive
-            ? t("batchActivateSuccess", { count: data.updated })
-            : t("batchDeactivateSuccess", { count: data.updated })
+            ? t("batchActivateSuccess", { count: updated })
+            : t("batchDeactivateSuccess", { count: updated })
         );
-      } else {
-        const data = await res.json().catch(() => ({}));
-        notify.error(data.error?.message || data.error || "Batch update failed");
       }
-    } catch {
-      notify.error("Network error during batch update");
+    } catch (error: any) {
+      notify.error(error?.message || "Network error during batch update");
     } finally {
       setBatchUpdating(null);
     }
@@ -2272,7 +2292,8 @@ export default function ProviderDetailPageClient() {
       });
       if (data?.summary) {
         const { passed, failed, total } = data.summary;
-        if (failed === 0) notify.success(t("allTestsPassed", { total }));
+        if (total === 0) notify.warning(t("noConnectionsToTest"));
+        else if (failed === 0) notify.success(t("allTestsPassed", { total }));
         else notify.warning(t("testSummary", { passed, failed, total }));
       }
       // Refresh connections to update statuses
@@ -2301,6 +2322,12 @@ export default function ProviderDetailPageClient() {
   // Batch retest only the selected connections
   const handleBatchRetest = async () => {
     if (batchRetesting || selectedIds.size === 0) return;
+    // Live-testing a huge selection risks the 120s client abort; bound it to the
+    // same cap the API enforces and tell the user to narrow the selection.
+    if (selectedIds.size > MAX_BULK_IDS) {
+      notify.warning(t("batchRetestLimit", { max: MAX_BULK_IDS }));
+      return;
+    }
     setBatchRetesting(true);
     try {
       await runBatchTest({ mode: "selected", connectionIds: Array.from(selectedIds) });
@@ -3824,7 +3851,7 @@ export default function ProviderDetailPageClient() {
               {connections.length > 1 && (
                 <button
                   onClick={handleBatchTestAll}
-                  disabled={batchTesting || !!retestingId}
+                  disabled={batchTesting || batchRetesting || !!retestingId}
                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
                     batchTesting
                       ? "bg-primary/20 border-primary/40 text-primary animate-pulse"
@@ -4046,7 +4073,10 @@ export default function ProviderDetailPageClient() {
               );
               const allSelected = selectedIds.size === connections.length && connections.length > 0;
               const someSelected = selectedIds.size > 0 && selectedIds.size < connections.length;
-              const bulkBusy = batchUpdating !== null || batchRetesting || batchDeleting;
+              // Includes batchTesting (the "Test All" action) so the bulk buttons
+              // and Test All never run concurrently against the shared results state.
+              const bulkBusy =
+                batchUpdating !== null || batchRetesting || batchDeleting || batchTesting;
               const bulkActions = selectedIds.size > 0 && (
                 <div className="flex flex-wrap items-center justify-end gap-2">
                   <Button
