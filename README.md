@@ -707,12 +707,12 @@ Compression: aggressive (~50%) → double your free quota · Cost: $0/mo
 
 <br/>
 
-**Routing:** 15 strategies · task-aware smart routing · thinking budget controls · wildcard routing · system prompt injection.
+**Routing:** 15 strategies · task-aware smart routing · live Arena ELO free-provider rankings · thinking budget controls · wildcard routing · system prompt injection.
 **Compatibility:** OpenAI ↔ Claude ↔ Gemini ↔ Responses API · auto OAuth refresh (PKCE, 8 providers) · multi-account round-robin · Batch + Files API · live OpenAPI 3.0.
 **Protocols:** MCP (87 tools, 3 transports, 30 scopes) · A2A (JSON-RPC 2.0, SSE, 6 skills) · ACP · cloud agents (Codex, Devin, Jules).
 **Plugins:** custom plugin marketplace (system-configured registry URL with SSRF-guarded fetch) · install / enable / disable · Notion + Obsidian knowledge-base integrations (WebDAV file server, vault search, note CRUD).
 **Embedded services:** one-click install & lifecycle management of local sidecar services (CLIProxy, NineRouter).
-**Quality & Ops:** built-in **Evals** (golden-set: exact/contains/regex/custom) · guardrails (PII, injection, vision) · health dashboard · p50/p95/p99 telemetry · webhooks · compliance audit.
+**Quality & Ops:** built-in **Evals** (golden-set: exact/contains/regex/custom) · guardrails (PII, injection, vision) · cost/savings tracking · runtime feature flags · health dashboard · p50/p95/p99 telemetry · webhooks · compliance audit.
 **AI Agent Skills:** drop-in markdown manifests — point any agent at a `skills/*/SKILL.md` manifest. 43 skills available.
 
 📖 [MCP Server](open-sse/mcp-server/README.md) · [A2A Server](src/lib/a2a/README.md) · [Resilience Guide](docs/architecture/RESILIENCE_GUIDE.md) · [Features Gallery](docs/guides/FEATURES.md)
@@ -821,12 +821,13 @@ Compression: aggressive (~50%) → double your free quota · Cost: $0/mo
 
 ### 📘 Getting Started
 
-| Document                                       | Description                                                                   |
-| ---------------------------------------------- | ----------------------------------------------------------------------------- |
-| [User Guide](docs/guides/USER_GUIDE.md)        | Providers, combos, CLI integration, deployment                                |
-| [Setup Guide](docs/guides/SETUP_GUIDE.md)      | Full install methods, CLI tool configs, protocol setup, timeout tuning        |
-| [CLI Tools Guide](docs/reference/CLI-TOOLS.md) | Per-tool setup for Claude Code, Codex, Cursor, Cline, OpenClaw, Kilo, Copilot |
-| [Quick Start](README.md#-quick-start)          | 3-step install → connect → configure                                          |
+| Document                                                        | Description                                                                   |
+| --------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| [User Guide](docs/guides/USER_GUIDE.md)                         | Providers, combos, CLI integration, deployment                                |
+| [Setup Guide](docs/guides/SETUP_GUIDE.md)                       | Full install methods, CLI tool configs, protocol setup, timeout tuning        |
+| [CLI Tools Guide](docs/reference/CLI-TOOLS.md)                  | Per-tool setup for Claude Code, Codex, Cursor, Cline, OpenClaw, Kilo, Copilot |
+| [Free Provider Rankings](docs/guides/FREE_PROVIDER_RANKINGS.md) | Pick the best free models, ranked by live Arena AI ELO scores                 |
+| [Quick Start](README.md#-quick-start)                           | 3-step install → connect → configure                                          |
 
 ### 🔧 Operations & Deployment
 
@@ -840,6 +841,8 @@ Compression: aggressive (~50%) → double your free quota · Cost: $0/mo
 | [PWA Guide](docs/guides/PWA_GUIDE.md)                    | Progressive Web App install, caching, architecture             |
 | [Uninstall Guide](docs/guides/UNINSTALL.md)              | Clean removal for all install methods                          |
 | [Environment Config](docs/reference/ENVIRONMENT.md)      | Complete `.env` variables and references                       |
+| [Feature Flags](docs/reference/FEATURE_FLAGS.md)         | Runtime feature toggles — flip behavior without a redeploy     |
+| [Egress IP Policy](docs/security/EGRESS_POLICY.md)       | IPv4 / IPv6 egress family selection per proxy & connection     |
 
 ### 🧠 Features & Architecture
 
@@ -857,6 +860,10 @@ Compression: aggressive (~50%) → double your free quota · Cost: $0/mo
 | [Free Tiers](docs/reference/FREE_TIERS.md)                                   | 25+ free API providers consolidated directory                                 |
 | [Features Gallery](docs/guides/FEATURES.md)                                  | Visual dashboard tour with screenshots                                        |
 | [Codebase Documentation](docs/architecture/CODEBASE_DOCUMENTATION.md)        | Beginner-friendly codebase walkthrough                                        |
+| [Cost & Spend Tracking](docs/guides/COST_TRACKING.md)                        | Savings tracker, pricing sync, per-key budgets, cost explorer                 |
+| [Plugin Marketplace](docs/frameworks/PLUGIN_MARKETPLACE.md)                  | Custom plugin registry, SSRF-guarded install, lifecycle management            |
+| [Notion Context](docs/frameworks/NOTION_CONTEXT.md)                          | Notion knowledge-base integration (6 MCP tools)                               |
+| [Obsidian Context](docs/frameworks/OBSIDIAN_CONTEXT.md)                      | Obsidian vault integration + WebDAV file server (22 MCP tools)                |
 
 ### 🤖 Protocols & APIs
 
