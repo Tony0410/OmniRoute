@@ -88,6 +88,15 @@ jobs:
       # coverage mergeado). Tamanho de arquivo e duplicação têm gates dedicados.
       - name: Ratchet check
         run: node scripts/quality/check-quality-ratchet.mjs --summary .artifacts/quality-ratchet.md
+      # Fase 6A.5: require-tighten — ADVISORY por enquanto (continue-on-error). Reporta
+      # quando uma métrica MELHOROU sem o baseline ter sido apertado no mesmo PR (força
+      # capturar ganhos permanentes). As métricas coverage.* carregam tightenSlack para
+      # o gap anti-flake (CI mergeado > baseline) não disparar falso-positivo. Promover a
+      # BLOQUEANTE no fim do ciclo removendo o `continue-on-error` (ver a nota
+      # _require_tighten_advisory em config/quality/quality-baseline.json).
+      - name: Require-tighten (advisory — flip to blocking at cycle-end)
+        continue-on-error: true
+        run: node scripts/quality/check-quality-ratchet.mjs --require-tighten
       # Catraca de duplicação (jscpd@4 sobre src+open-sse). Roda neste job (paralelo)
       # para não pesar no caminho crítico do lint.
       - name: Duplication ratchet
