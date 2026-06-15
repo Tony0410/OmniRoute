@@ -23,6 +23,11 @@ coverage/
 .build/**
 .out/**
 
+# Stryker mutation testing — ephemeral sandbox + generated reports (never commit)
+.stryker-tmp/
+reports/mutation/
+stryker-output-*.json
+
 
 # Memory Bank and Cursor rules (local-only AI agent context)
 memory-bank/

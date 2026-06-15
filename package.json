@@ -163,6 +163,7 @@
     "test:protocols:e2e": "node scripts/dev/run-protocol-clients-tests.mjs",
     "test:vitest": "vitest run --config vitest.mcp.config.ts",
     "test:vitest:ui": "vitest run --config vitest.config.ts tests/unit/ui",
+    "test:mutation": "stryker run",
     "test:ecosystem": "node scripts/dev/run-ecosystem-tests.mjs",
     "test:system": "cross-env DISABLE_SQLITE_AUTO_BACKUP=true node --import tsx --import ./open-sse/utils/setupPolyfill.ts --test --test-force-exit --test-concurrency=1 tests/e2e/system-failover.test.ts",
     "test:coverage": "cross-env DISABLE_SQLITE_AUTO_BACKUP=true c8 --output-dir coverage --exclude=tests/** --exclude=**/*.test.* --reporter=text-summary --reporter=html --reporter=json-summary --reporter=lcov --check-coverage --statements 60 --lines 60 --functions 60 --branches 60 node --max-old-space-size=8192 --import tsx --import ./open-sse/utils/setupPolyfill.ts --test --test-force-exit --test-concurrency=8 tests/unit/*.test.ts \"tests/unit/{api,auth,authz,build,cli,cli-helper,compression,correctness,cors,dashboard,db,db-adapters,docs,gamification,guardrails,lib,mcp,runtime,security,services,settings,shared,ui}/**/*.test.ts\"",
@@ -261,6 +262,8 @@
   "devDependencies": {
     "@cyclonedx/cyclonedx-npm": "4.2.1",
     "@playwright/test": "^1.60.0",
+    "@stryker-mutator/core": "^9.6.1",
+    "@stryker-mutator/tap-runner": "^9.6.1",
     "@tailwindcss/postcss": "^4.3.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
