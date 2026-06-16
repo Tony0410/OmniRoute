@@ -158,13 +158,30 @@ USER root
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
   --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
   apt-get update \
-  && apt-get install -y --no-install-recommends git ca-certificates docker.io docker-compose \
+  && apt-get install -y --no-install-recommends git ca-certificates curl bzip2 docker.io docker-compose \
   && rm -rf /var/lib/apt/lists/* \
   && git config --system url."https://github.com/".insteadOf "ssh://git@github.com/"
 
 # Install CLI tools globally. Separate layer from apt for better cache reuse.
 RUN --mount=type=cache,target=/root/.npm \
-  npm install -g --no-audit --no-fund @openai/codex @anthropic-ai/claude-code droid openclaw@latest @qoder-ai/qodercli
+  npm install -g --no-audit --no-fund \
+    @openai/codex \
+    @anthropic-ai/claude-code \
+    droid \
+    openclaw@latest \
+    @qoder-ai/qodercli \
+    @google/gemini-cli \
+    opencode-ai \
+    @kilocode/cli \
+    @earendil-works/pi-coding-agent
+
+# Goose is distributed as a release tarball rather than an npm package.
+RUN curl -fL --retry 3 \
+  -o /tmp/goose-x86_64-unknown-linux-gnu.tar.bz2 \
+  https://github.com/aaif-goose/goose/releases/download/stable/goose-x86_64-unknown-linux-gnu.tar.bz2 \
+  && tar -xjf /tmp/goose-x86_64-unknown-linux-gnu.tar.bz2 -C /usr/local/bin ./goose \
+  && chmod 755 /usr/local/bin/goose \
+  && rm -f /tmp/goose-x86_64-unknown-linux-gnu.tar.bz2
 
 COPY scripts/qoder_proxy_v2.mjs /app/qoder_proxy_v2.mjs
 COPY scripts/start-omniroute-cli.sh /app/start-omniroute-cli.sh
