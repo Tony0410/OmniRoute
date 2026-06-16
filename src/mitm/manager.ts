@@ -172,6 +172,17 @@ const urlPath =
 const cwdPath = path.join(process.cwd(), "src", "mitm", "server.cjs");
 const MITM_SERVER_PATH = fs.existsSync(cwdPath) ? cwdPath : urlPath;
 
+function envFlag(name: string): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes" || value === "on";
+}
+
+function getDefaultMitmPort(): number {
+  const raw = process.env.AGENTBRIDGE_PORT || process.env.MITM_LOCAL_PORT;
+  const port = raw ? Number.parseInt(raw, 10) : 443;
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : 443;
+}
+
 // Check if a PID is alive
 function isProcessAlive(pid: number): boolean {
   try {
@@ -283,43 +294,55 @@ export async function startMitm(
     await generateCert();
   }
 
-  // 2. Install certificate to system keychain
-  await installCert(sudoPassword, certPath);
-
-  // 3. Add DNS entries: Antigravity defaults + all agents with dns_enabled=true +
-  //    all custom hosts with enabled=true.
-  log.info("Adding DNS entries...");
-  await addDNSEntry(sudoPassword);
-
-  // Collect hosts from agents that have dns_enabled=true in the DB.
-  try {
-    const agentStates = getAllAgentBridgeStates();
-    const agentHostsToAdd: string[] = [];
-    for (const state of agentStates) {
-      if (!state.dns_enabled) continue;
-      const target = ALL_TARGETS.find((t) => t.id === state.agent_id);
-      if (target) {
-        agentHostsToAdd.push(...target.hosts);
-      }
-    }
-    if (agentHostsToAdd.length > 0) {
-      log.info({ count: agentHostsToAdd.length }, "Adding DNS for agent host(s)...");
-      await addDNSEntries(agentHostsToAdd, sudoPassword);
-    }
-  } catch (err) {
-    log.error({ err }, "Failed to add agent DNS entries (continuing)");
+  // 2. Install certificate to system keychain unless Docker/remote mode is
+  //    explicitly handling trust outside the container.
+  if (envFlag("AGENTBRIDGE_SKIP_CERT_INSTALL")) {
+    log.info("Skipping certificate installation because AGENTBRIDGE_SKIP_CERT_INSTALL is enabled");
+  } else {
+    await installCert(sudoPassword, certPath);
   }
 
-  // Collect enabled custom hosts.
-  try {
-    const customHosts = listCustomHosts({ enabledOnly: true });
-    const customHostNames = customHosts.map((h) => h.host);
-    if (customHostNames.length > 0) {
-      log.info({ count: customHostNames.length }, "Adding DNS for custom host(s)...");
-      await addDNSEntries(customHostNames, sudoPassword);
+  // 3. Add DNS entries: Antigravity defaults + all agents with dns_enabled=true +
+  //    all custom hosts with enabled=true, unless Docker/remote mode handles DNS externally.
+  const skipDnsConfig = envFlag("AGENTBRIDGE_SKIP_DNS_CONFIG");
+  if (skipDnsConfig) {
+    log.info("Skipping DNS configuration because AGENTBRIDGE_SKIP_DNS_CONFIG is enabled");
+  } else {
+    log.info("Adding DNS entries...");
+    await addDNSEntry(sudoPassword);
+  }
+
+  if (!skipDnsConfig) {
+    // Collect hosts from agents that have dns_enabled=true in the DB.
+    try {
+      const agentStates = getAllAgentBridgeStates();
+      const agentHostsToAdd: string[] = [];
+      for (const state of agentStates) {
+        if (!state.dns_enabled) continue;
+        const target = ALL_TARGETS.find((t) => t.id === state.agent_id);
+        if (target) {
+          agentHostsToAdd.push(...target.hosts);
+        }
+      }
+      if (agentHostsToAdd.length > 0) {
+        log.info({ count: agentHostsToAdd.length }, "Adding DNS for agent host(s)...");
+        await addDNSEntries(agentHostsToAdd, sudoPassword);
+      }
+    } catch (err) {
+      log.error({ err }, "Failed to add agent DNS entries (continuing)");
     }
-  } catch (err) {
-    log.error({ err }, "Failed to add custom host DNS entries (continuing)");
+
+    // Collect enabled custom hosts.
+    try {
+      const customHosts = listCustomHosts({ enabledOnly: true });
+      const customHostNames = customHosts.map((h) => h.host);
+      if (customHostNames.length > 0) {
+        log.info({ count: customHostNames.length }, "Adding DNS for custom host(s)...");
+        await addDNSEntries(customHostNames, sudoPassword);
+      }
+    } catch (err) {
+      log.error({ err }, "Failed to add custom host DNS entries (continuing)");
+    }
   }
 
   // 4. Start MITM server
@@ -330,7 +353,7 @@ export async function startMitm(
     options.port > 0 &&
     options.port <= 65535
       ? options.port
-      : 443;
+      : getDefaultMitmPort();
   serverProcess = spawn(process.execPath, [MITM_SERVER_PATH], {
     env: {
       ...process.env,
@@ -457,9 +480,13 @@ export async function stopMitm(sudoPassword: string): Promise<{ running: false; 
     serverPid = null;
   }
 
-  // 2. Remove DNS entry
-  log.info("Removing DNS entry...");
-  await removeDNSEntry(sudoPassword);
+  // 2. Remove DNS entry unless Docker/remote mode handles DNS externally.
+  if (envFlag("AGENTBRIDGE_SKIP_DNS_CONFIG")) {
+    log.info("Skipping DNS cleanup because AGENTBRIDGE_SKIP_DNS_CONFIG is enabled");
+  } else {
+    log.info("Removing DNS entry...");
+    await removeDNSEntry(sudoPassword);
+  }
 
   // 3. Clean up
   clearCachedPassword(); // Clear password from memory when proxy stops
