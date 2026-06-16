@@ -13,6 +13,7 @@
     "@ngrok/ngrok",
     "@opencode-ai/plugin",
     "@playwright/test",
+    "@size-limit/file",
     "@stryker-mutator/core",
     "@stryker-mutator/tap-runner",
     "@swc/helpers",

@@ -70,6 +70,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: test-coverage
     if: ${{ always() && needs.test-coverage.result == 'success' }}
+    # security-events: read lets the CodeQL ratchet read open code-scanning alerts
+    # via `gh api .../code-scanning/alerts`. contents: read keeps checkout working.
+    permissions:
+      contents: read
+      security-events: read
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -112,6 +117,14 @@ jobs:
         run: npm run check:cognitive-complexity
       - name: Type coverage ratchet
         run: npm run check:type-coverage
+      # CodeQL alerts ratchet — BLOQUEANTE (promovido de advisory na v3.8.26).
+      # Lê metrics.codeqlAlerts.value de quality-baseline.json e sai 1 SOMENTE numa
+      # regressão real (alertas abertos > baseline). Falha de medição (gh/auth/api)
+      # é skip gracioso com exit 0 — security-events:read no job-level permissions.
+      - name: CodeQL alerts ratchet (blocking)
+        run: npm run check:codeql-ratchet
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Append summary
         if: always()
         run: cat .artifacts/quality-ratchet.md >> "$GITHUB_STEP_SUMMARY"
@@ -123,11 +136,12 @@ jobs:
           path: .artifacts/quality-ratchet.md
           if-no-files-found: warn
 
-  # Phase 7 extended quality gates — ADVISORY (continue-on-error). The 5 npm-based
-  # ratchets (dead-code/cognitive-complexity/type-coverage/circular-deps/bundle-size)
-  # run for real. The external scans (vuln/secrets/workflows) skip gracefully until the
-  # owner adds install steps for osv-scanner/gitleaks/actionlint/zizmor; CodeQL ratchet
-  # works via the runner's gh token. SonarQube needs SONAR_TOKEN/SONAR_HOST_URL secrets.
+  # Phase 7 extended quality gates — ADVISORY (continue-on-error). The npm-based
+  # ratchets that remain here (circular-deps/bundle-size) run for real. The external
+  # scans (vuln/secrets/workflows) install via GitHub release downloads and skip
+  # gracefully if a binary is still absent. The CodeQL ratchet was PROMOTED to a
+  # blocking step in the quality-gate job (v3.8.26) — no longer runs here.
+  # SonarQube needs SONAR_TOKEN/SONAR_HOST_URL secrets.
   quality-extended:
     name: Quality Gates (Extended, advisory)
     runs-on: ubuntu-latest
@@ -145,24 +159,41 @@ jobs:
         run: npm run check:circular-deps
       - name: Bundle size
         run: npm run check:bundle-size
-      - name: CodeQL alerts ratchet
-        run: npm run check:codeql-ratchet
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      # Fase 7 INT: install the advisory security scanners so the gates below
-      # actually run (they self-skip when the binaries are absent). go install
-      # uses documented module paths (no fragile version-pinned URLs); zizmor is
-      # a PyPI package. Whole job is continue-on-error, so an install hiccup never
-      # blocks the build. Exercised at the next release→main run.
+      # CodeQL ratchet foi PROMOVIDO a BLOQUEANTE no job quality-gate (v3.8.26) —
+      # não roda aqui para evitar duplo run/duplo report.
+      # Install the advisory security scanners so the gates below actually run
+      # (they self-skip when the binaries are absent). Robustness over `go install`:
+      # `go install github.com/gitleaks/gitleaks/v8@latest` produces a binary WITHOUT
+      # the version ldflags gitleaks needs (and often fails) — under `bash -e` that
+      # aborts the whole step before the PATH export, so NO scanner lands on PATH and
+      # every check self-skips. Here we `set +e` (no single failure aborts the step),
+      # install from official RELEASE DOWNLOADS, ALWAYS export $GITHUB_PATH at the end,
+      # and print diagnostics so the next CI run proves exactly what installed. The job
+      # is continue-on-error too, so an install hiccup never blocks the build.
       - name: Install advisory security scanners (gitleaks/osv/actionlint/zizmor)
         continue-on-error: true
         run: |
-          go install github.com/rhysd/actionlint/cmd/actionlint@latest
-          go install github.com/gitleaks/gitleaks/v8@latest
-          go install github.com/google/osv-scanner/v2/cmd/osv-scanner@latest
-          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+          set +e
+          mkdir -p "$HOME/.local/bin"
+          # gitleaks — resolve latest linux x64 tarball, extract just the binary
+          GL=$(curl -fsSL https://api.github.com/repos/gitleaks/gitleaks/releases/latest | grep -oE 'https://[^"]+linux_x64\.tar\.gz' | head -1)
+          curl -fsSL "$GL" | tar -xz -C "$HOME/.local/bin" gitleaks
+          # osv-scanner — resolve latest linux amd64 binary
+          OSV=$(curl -fsSL https://api.github.com/repos/google/osv-scanner/releases/latest | grep -oE 'https://[^"]+linux_amd64' | head -1)
+          curl -fsSL -o "$HOME/.local/bin/osv-scanner" "$OSV"
+          chmod +x "$HOME/.local/bin/osv-scanner"
+          # actionlint — official download script
+          bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) latest "$HOME/.local/bin"
+          # zizmor — PyPI (pipx preferred, pip --user fallback); lands in ~/.local/bin
           pipx install zizmor || pip install --user zizmor
+          # ALWAYS export the bin dir (even if any step above failed)
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          # diagnostics — prove what installed on the next CI run
+          ls -la "$HOME/.local/bin"
+          "$HOME/.local/bin/gitleaks" version || true
+          "$HOME/.local/bin/actionlint" -version || true
+          "$HOME/.local/bin/osv-scanner" --version || true
+          zizmor --version || true
       - name: Secret scan (gitleaks; skips if absent)
         run: npm run check:secrets
       - name: Vulnerability ratchet (osv-scanner; skips if absent)
