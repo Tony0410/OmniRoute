@@ -97,14 +97,14 @@ jobs:
       # coverage mergeado). Tamanho de arquivo e duplicação têm gates dedicados.
       - name: Ratchet check
         run: node scripts/quality/check-quality-ratchet.mjs --summary .artifacts/quality-ratchet.md
-      # Fase 6A.5: require-tighten — ADVISORY por enquanto (continue-on-error). Reporta
-      # quando uma métrica MELHOROU sem o baseline ter sido apertado no mesmo PR (força
-      # capturar ganhos permanentes). As métricas coverage.* carregam tightenSlack para
-      # o gap anti-flake (CI mergeado > baseline) não disparar falso-positivo. Promover a
-      # BLOQUEANTE no fim do ciclo removendo o `continue-on-error` (ver a nota
-      # _require_tighten_advisory em config/quality/quality-baseline.json).
-      - name: Require-tighten (advisory — flip to blocking at cycle-end)
-        continue-on-error: true
+      # Fase 6A.5: require-tighten — BLOQUEANTE (promovido de advisory no fim do ciclo
+      # v3.8.27). Falha quando uma métrica MELHOROU sem o baseline ter sido apertado no
+      # mesmo PR (força capturar ganhos permanentes). As métricas coverage.* carregam
+      # tightenSlack para o gap anti-flake (CI mergeado > baseline) não disparar falso-
+      # positivo. Verificado limpo (exit 0) no tip de release/v3.8.27 com a cobertura
+      # mergeada == baseline (ver a nota _require_tighten_flip_blocking em
+      # config/quality/quality-baseline.json).
+      - name: Require-tighten (blocking)
         run: node scripts/quality/check-quality-ratchet.mjs --require-tighten
       # Catraca de duplicação (jscpd@4 sobre src+open-sse). Roda neste job (paralelo)
       # para não pesar no caminho crítico do lint.
@@ -232,9 +232,14 @@ jobs:
       # is absent (a missing binary never blocks).
       - name: Secret scan (gitleaks, ratchet, blocking)
         run: npm run check:secrets -- --ratchet
-      - name: Vulnerability ratchet (osv-scanner; advisory, skips if absent)
-        continue-on-error: true
-        run: npm run check:vuln-ratchet
+      # BLOCKING ratchet (v3.8.27 cycle-end): vulnCount must not regress vs the
+      # baseline. --ratchet exits 1 on a measured regression (measured > baseline);
+      # it SKIPs (exit 0) when osv-scanner is absent or osv.dev is unreachable (a
+      # missing/failed measurement never blocks). See the CVE-variance note in
+      # docs/security/SUPPLY_CHAIN.md — a newly-disclosed CVE on an unchanged dep can
+      # red this gate; the fix is to bump the dep or re-baseline metrics.vulnCount.
+      - name: Vulnerability ratchet (osv-scanner, ratchet, blocking)
+        run: npm run check:vuln-ratchet -- --ratchet
       # BLOCKING ratchet (Etapa 2): zizmorFindings must not regress vs the baseline.
       # ONLY zizmor is ratcheted — actionlint findings are reported, not blocking.
       # --ratchet exits 1 on a measured zizmor regression; it SKIPs (exit 0) when
