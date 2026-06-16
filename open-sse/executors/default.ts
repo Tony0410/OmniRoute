@@ -569,6 +569,14 @@ export class DefaultExecutor extends BaseExecutor {
           delete withoutStreamOptions.stream_options;
           withDefaults = withoutStreamOptions;
         }
+      } else if (!stream && Object.prototype.hasOwnProperty.call(withDefaults, "stream_options")) {
+        // #3884: stream_options is only valid on streaming requests. NVIDIA NIM
+        // (and the OpenAI spec) reject "Stream options can only be defined when
+        // stream=True" on non-streaming calls. Strip any client-sent
+        // stream_options when the outbound request is not streaming.
+        const withoutStreamOptions = { ...withDefaults } as Record<string, unknown>;
+        delete withoutStreamOptions.stream_options;
+        withDefaults = withoutStreamOptions;
       } else if (
         (targetFormat === "openai-responses" || requestFormat === "openai-responses") &&
         Object.prototype.hasOwnProperty.call(withDefaults, "stream_options")
