@@ -6,7 +6,7 @@
  * Body: AgentBridgeServerActionSchema
  */
 import { AgentBridgeServerActionSchema } from "@/shared/schemas/agentBridge";
-import { startMitm, stopMitm, getMitmStatus, setCachedPassword, getCachedPassword } from "@/mitm/manager";
+import { startMitm, stopMitm, getMitmStatus, setCachedPassword, getCachedPassword } from "@/mitm/manager.runtime";
 import { installCert, checkCertInstalled } from "@/mitm/cert/install";
 import { generateCert } from "@/mitm/cert/generate";
 import { resolveMitmDataDir } from "@/mitm/dataDir";

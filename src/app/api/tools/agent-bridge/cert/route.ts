@@ -6,7 +6,7 @@
 import { z } from "zod";
 import { installCert, checkCertInstalled } from "@/mitm/cert/install";
 import { resolveMitmDataDir } from "@/mitm/dataDir";
-import { getCachedPassword } from "@/mitm/manager";
+import { getCachedPassword } from "@/mitm/manager.runtime";
 import path from "path";
 import fs from "fs";
 import { sanitizeErrorMessage } from "@omniroute/open-sse/utils/error";

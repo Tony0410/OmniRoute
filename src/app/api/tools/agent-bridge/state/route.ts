@@ -3,7 +3,7 @@
  * Returns global MITM server status + per-agent detection/status.
  * LOCAL_ONLY: registered in routeGuard.ts
  */
-import { getMitmStatus, getAllAgentsStatus } from "@/mitm/manager";
+import { getMitmStatus, getAllAgentsStatus } from "@/mitm/manager.runtime";
 import { sanitizeErrorMessage } from "@omniroute/open-sse/utils/error";
 import { createErrorResponse } from "@/lib/api/errorResponse";
 
