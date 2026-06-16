@@ -164,6 +164,13 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 
 # Install CLI tools globally. Separate layer from apt for better cache reuse.
 RUN --mount=type=cache,target=/root/.npm \
-  npm install -g --no-audit --no-fund @openai/codex @anthropic-ai/claude-code droid openclaw@latest
+  npm install -g --no-audit --no-fund @openai/codex @anthropic-ai/claude-code droid openclaw@latest @qoder-ai/qodercli
+
+COPY scripts/qoder_proxy_v2.mjs /app/qoder_proxy_v2.mjs
+COPY scripts/start-omniroute-cli.sh /app/start-omniroute-cli.sh
+RUN chmod +x /app/start-omniroute-cli.sh \
+  && chown node:node /app/qoder_proxy_v2.mjs /app/start-omniroute-cli.sh
 
 USER node
+
+CMD ["/app/start-omniroute-cli.sh"]
